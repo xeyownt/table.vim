@@ -14,9 +14,11 @@
 "
 " Patch:
 " - Tab in INSERT mode now insert blanks, hence indenting field. This
-"   is closer to expectation I think. NORMAL mode still behaves as 
+"   is closer to expectation I think. NORMAL mode still behaves as
 "   usual
+" - Auto-heading mode (use previous line as heading)
 " - Add "Table enabled/disabled" message on toggle
+" - Support "  ",":","=","(" as delimiters
 " - Use an array of field position. This makes the code clearer and prepare
 "   for variable fieldsep in the future
 " - Fixed some boundary cases, and make all pos variable 0-based to avoid
@@ -25,64 +27,57 @@
 "
 " ToDo:
 " - Support variable fieldsep specification
-" - Use previous line as heading line (auto-heading)
 " - Guess fieldsep in a smart way
 "   (like align on "  " or on "=" if they are themselves aligned in previous
 "    lines)
 
 
 map <silent> <Leader>tt :call TableToggle()<CR>
-map <silent> <Leader>th :call TableHeading()<CR>
+map <silent> <Leader>th :call TableHeading(0)<CR>
+map <silent> <Leader>tH :call TableHeading(1)<CR>
 map <silent> <Leader>ta :call TableAlign()<CR>
 
 let s:tablemode = 0
-let s:heading = ''
-let s:fieldsep = ' \{2,}'
-let s:headingpos = []
+let s:fieldsep = '  \+.\|.:\|.=\|.(\|: *.\|= *.\|( *.'
+let s:fielddelim = [':','=','(']
+let s:headingpos = [0]
 
 " Function: TableHeading
 " Args: None
 "
-" use current line as the heading line of the table
-" current line should be non-empty
+" use current line (or previous line if auto) as the heading line of the table
 
-func! TableHeading()
-    " get heading line and store it in a script variable
-    let s:heading = TrimWS(ExpandTabs(getline(".")))
-
-    if !ValidHeading(s:heading)
-        return
+func! TableHeading(auto)
+    if a:auto == 0
+        " Set field stops from current line
+        let s:headingpos = GetHeadingPos(line("."))
+        let s:tablemode = 1
+    else
+        let s:tablemode = 2
     endif
-
-    " Extract field stops from heading line
-    let s:headingpos = []
-    let l:pos = matchend(s:heading,' *')
-    while pos >= 0
-        call add(s:headingpos,pos)
-        let pos = matchend(s:heading,s:fieldsep,pos)
-    endwhile
 
     " map keys to invoke table navigation functions
     call EnableMaps()
-
-    let s:tablemode = 1
 endfunc
 
-" Function: ValidHeading
-" Args: None
-" Return: boolean
+
+" Function: GetHeadingPos
+" Args: heading line
 "
-" returns 1 if heading is valid, i.e., non-whitespace
-" returns 0 otherwise
-
-func! ValidHeading(heading)
-    " heading line empty ==> invalid heading
-    let l:str = a:heading
-    if strlen(str) == matchend(str,'^ *')
-        return 0
-    endif
-    return 1
+" Search fieldsep in given line, and set heading tab position accordingly
+func! GetHeadingPos(linenum)
+    " Extract field stops from heading line
+    let l:linetxt = TrimWS(ExpandTabs(getline(a:linenum)))
+    let l:linepos = []
+    let l:pos = matchend(linetxt,' *')
+    while pos >= 0
+        call add(linepos,pos)
+        let pos = matchend(linetxt,s:fieldsep,pos) - 1
+    endwhile
+    " let &statusline = join(linepos,', ')
+    return linepos
 endfunc
+
 
 " Function: TableToggle
 " Args: None
@@ -91,20 +86,15 @@ endfunc
 " Enable/Disable maps for tablemode keys
 
 func! TableToggle()
-
-    if !ValidHeading(s:heading)
-        return
-    endif
+    " toggle tablemode
+    let s:tablemode = - s:tablemode
 
     " enable/disable maps
-    if s:tablemode
-        call DisableMaps()
-    else
+    if s:tablemode > 0
         call EnableMaps()
+    else
+        call DisableMaps()
     endif
-
-    " toggle tablemode
-    let s:tablemode = !s:tablemode
 endfunc
 
 " Function: Enable Maps
@@ -117,7 +107,11 @@ func! EnableMaps()
     inoremap <silent> <Tab>    <C-O>:let save_ve=&ve<CR><C-O>:set ve=all<CR><C-O>:call NextField(1)<CR><C-O>:let &ve=save_ve<CR>
     nnoremap <silent> <S-Tab>  :call PrevField()<CR>
     inoremap <silent> <S-Tab>  <C-O>:call PrevField()<CR>
-    echo "Table enabled (<Leader>ta to align a selection, <Tab>/<S-Tab> for next/previous fields)"
+    if s:tablemode == 1
+        echo "Table enabled"
+    else
+        echo "Table enabled - AUTO"
+    endif
 endfunc
 
 " Function: Disable Maps
@@ -143,24 +137,48 @@ func! TableAlign()
         return
     endif
 
+    " Parse previous lines in automatic mode
+    if s:tablemode == 2
+        if line(".") <= 1
+            return
+        endif
+        let s:headingpos = GetHeadingPos(line(".") - 1)
+    endif
+
     let temp = ""
     let linetext = TrimWS(ExpandTabs(getline('.')))
-    let linepos = LenWS(linetext,0)
-    let idx = 0
+    let linepos = GetHeadingPos(line('.'))
 
-    while (idx < len(s:headingpos)) && (linepos >= 0)
-        if idx > 0
-            " Pad at least our field sep
+    let idx = 0
+    let mustpad = 0
+    while (idx < len(s:headingpos)) && (idx < len(linepos))
+        let field = Getfield(linetext,linepos,idx)
+        let isnotdelim = index(s:fielddelim,field) < 0
+
+        " Pre-pad if previous and current field is not a delimiter
+        if mustpad && isnotdelim
             let temp = temp . "  "
         endif
-        " Pad to next field of heading and add contents of the next text field after that
-        let temp = temp . repeat(' ',s:headingpos[idx]-strlen(temp))
-        let temp = temp . Getfield(linetext,linepos)
 
-        " Get next position of field in current line
-        let linepos = matchend(linetext,s:fieldsep,linepos)
+        " Next field must not be pre-padded if current field is a delimiter
+        let mustpad = isnotdelim
+
+        " Pad to next field of heading and add contents of the next text field after that
+        let temp = temp . repeat(' ',s:headingpos[idx]-strlen(temp)) . field
+
+        " Go to next field
         let idx = idx + 1
     endwhile
+
+    " Paste remaining part of current line, if any (don't forget pre-padding if necessary)
+    if idx < len(linepos)
+        let field = Getfield(linetext,linepos,idx)
+        let isnotdelim = index(s:fielddelim,field) < 0
+        if mustpad && isnotdelim
+            let temp = temp . "  "
+        endif
+        let temp = temp . strpart(linetext,linepos[idx])
+    endif
 
     if temp != linetext
         call setline('.',temp)
@@ -174,6 +192,14 @@ endfunc
 " position the cursor at the start of the prev field position
 
 func! PrevField()
+    " Parse previous lines in automatic mode
+    if s:tablemode == 2
+        if line(".") <= 1
+            return
+        endif
+        let s:headingpos = GetHeadingPos(line(".") - 1)
+    endif
+
     let pos = col('.') - 1
     let linenum = line('.')
 
@@ -203,6 +229,14 @@ endfunc
 " or replace mode
 
 func! NextField(curmode)
+    " Parse previous lines in automatic mode
+    if s:tablemode == 2
+        if line(".") <= 1
+            return
+        endif
+        let s:headingpos = GetHeadingPos(line(".") - 1)
+    endif
+
     " pos=0 means 1st char (Note that we are in virtual edit mode)
     let l:pos = col('.') - 1
     let l:posnext = NextFieldPos(pos)
@@ -261,15 +295,18 @@ endfunc
 " Function: Getfield
 " Args: str, pos
 " Description: Extract the text contents of a field from the
-" string str, starting at position pos (pos 0-indexed)
+" string str, starting at position pos[idx] (pos 0-indexed)
 
-func! Getfield(str,pos)
-    let endpos = match(a:str,s:fieldsep,a:pos)
-    if endpos == -1
-        return strpart(a:str,a:pos)
-    else
-        return strpart(a:str,a:pos,endpos - a:pos)
+func! Getfield(str,pos,idx)
+    if a:idx >= len(a:pos)
+        return ""
     endif
+    if a:idx == len(a:pos) - 1
+        let field=strpart(a:str,a:pos[a:idx])
+    else
+        let field=strpart(a:str,a:pos[a:idx],a:pos[a:idx+1]-a:pos[a:idx])
+    endif
+    return TrimWS(field)
 endfunc
 
 
