@@ -1,15 +1,34 @@
 " Script: table.vim
-" Version: 0.1 
+" Version: 0.1-MPe
 "
-" Maintainer: Usman Latif Email: latif@techuser.net 
+" Maintainer: Usman Latif Email: latif@techuser.net
+" Patch: Michael Peeters Email: peeters-ml1@noekeon.org
 " Webpage: http://www.techuser.net
 "
 " Description:
 " This script defines maps for easier editing and alignmnet of tables.
 " For usage and installation instructions consult the documentation
-" files that came with this script. In case you are missing the 
+" files that came with this script. In case you are missing the
 " documentation files, download a complete distribution of the files
 " from http://www.techuser.net/files
+"
+" Patch:
+" - Tab in INSERT mode now insert blanks, hence indenting field. This
+"   is closer to expectation I think. NORMAL mode still behaves as 
+"   usual
+" - Add "Table enabled/disabled" message on toggle
+" - Use an array of field position. This makes the code clearer and prepare
+"   for variable fieldsep in the future
+" - Fixed some boundary cases, and make all pos variable 0-based to avoid
+"   future bugs.
+" - Replace some functions by native vim equivalent
+"
+" ToDo:
+" - Support variable fieldsep specification
+" - Use previous line as heading line (auto-heading)
+" - Guess fieldsep in a smart way
+"   (like align on "  " or on "=" if they are themselves aligned in previous
+"    lines)
 
 
 map <silent> <Leader>tt :call TableToggle()<CR>
@@ -19,23 +38,32 @@ map <silent> <Leader>ta :call TableAlign()<CR>
 let s:tablemode = 0
 let s:heading = ''
 let s:fieldsep = ' \{2,}'
+let s:headingpos = []
 
 " Function: TableHeading
 " Args: None
 "
 " use current line as the heading line of the table
 " current line should be non-empty
- 
-func! TableHeading() 
+
+func! TableHeading()
     " get heading line and store it in a script variable
     let s:heading = TrimWS(ExpandTabs(getline(".")))
 
     if !ValidHeading(s:heading)
-        return 
+        return
     endif
 
+    " Extract field stops from heading line
+    let s:headingpos = []
+    let l:pos = matchend(s:heading,' *')
+    while pos >= 0
+        call add(s:headingpos,pos)
+        let pos = matchend(s:heading,s:fieldsep,pos)
+    endwhile
+
     " map keys to invoke table navigation functions
-    call EnableMaps() 
+    call EnableMaps()
 
     let s:tablemode = 1
 endfunc
@@ -45,7 +73,7 @@ endfunc
 " Return: boolean
 "
 " returns 1 if heading is valid, i.e., non-whitespace
-" returns 0 otherwise 
+" returns 0 otherwise
 
 func! ValidHeading(heading)
     " heading line empty ==> invalid heading
@@ -65,7 +93,7 @@ endfunc
 func! TableToggle()
 
     if !ValidHeading(s:heading)
-        return 
+        return
     endif
 
     " enable/disable maps
@@ -86,9 +114,10 @@ endfunc
 
 func! EnableMaps()
     nnoremap <silent> <Tab>    :call NextField(0)<CR>
-    inoremap <silent> <Tab>    <C-O>:call NextField(1)<CR>
+    inoremap <silent> <Tab>    <C-O>:let save_ve=&ve<CR><C-O>:set ve=all<CR><C-O>:call NextField(1)<CR><C-O>:let &ve=save_ve<CR>
     nnoremap <silent> <S-Tab>  :call PrevField()<CR>
     inoremap <silent> <S-Tab>  <C-O>:call PrevField()<CR>
+    echo "Table enabled (<Leader>ta to align a selection, <Tab>/<S-Tab> for next/previous fields)"
 endfunc
 
 " Function: Disable Maps
@@ -101,6 +130,7 @@ func! DisableMaps()
     iunmap <Tab>
     nunmap <S-Tab>
     iunmap <S-Tab>
+    echo "Table disabled"
 endfunc
 
 
@@ -112,37 +142,27 @@ func! TableAlign()
     if !s:tablemode
         return
     endif
+
     let temp = ""
     let linetext = TrimWS(ExpandTabs(getline('.')))
+    let linepos = LenWS(linetext,0)
+    let idx = 0
 
-    let nfhead = LenWS(s:heading,0) + 1
-    let nftext = LenWS(linetext,0) + 1
-    let error = 0
-
-    while 1
-        " flag error if current field too big to fit
-        if (nfhead - strlen(temp))  <= 1 && strlen(temp) != 0 
-            let error = 1 
-            break
+    while (idx < len(s:headingpos)) && (linepos >= 0)
+        if idx > 0
+            " Pad at least our field sep
+            let temp = temp . "  "
         endif
+        " Pad to next field of heading and add contents of the next text field after that
+        let temp = temp . repeat(' ',s:headingpos[idx]-strlen(temp))
+        let temp = temp . Getfield(linetext,linepos)
 
-        " pad to next field of heading and add contents of the next text
-        " field after that
-        let temp = temp . Replicate(' ',nfhead - strlen(temp)-1) . Gettext(linetext,nftext-1)
-
-        let nfhead = NextFieldPos(s:heading,s:fieldsep,nfhead)
-        let nftext = NextFieldPos(linetext,s:fieldsep,nftext)
-
-        " If no next field exit loop
-        if nfhead == 0 || nftext == 0
-            " flag error if row to be aligned has more fields than heading
-            if nftext != 0 
-                let error = 1
-            endif
-            break
-        endif
+        " Get next position of field in current line
+        let linepos = matchend(linetext,s:fieldsep,linepos)
+        let idx = idx + 1
     endwhile
-    if !error && temp != linetext
+
+    if temp != linetext
         call setline('.',temp)
     endif
 endfunc
@@ -151,31 +171,29 @@ endfunc
 " Function: PrevField
 " Args: None
 "
-" position the cursor at the start of the prev field position 
+" position the cursor at the start of the prev field position
 
 func! PrevField()
-    let nextpos = 1
-    let lastpos = 1
-    let pos = col('.')
+    let pos = col('.') - 1
     let linenum = line('.')
-    let fstfield = LenWS(s:heading,0) + 1
 
-    while nextpos != 0
-        let lastpos = nextpos
-        let nextpos = NextFieldPos(s:heading,s:fieldsep,nextpos) 
-        if pos > lastpos && (pos <= nextpos || nextpos == 0)
-            let pos = lastpos
-        endif
+    " Find index of current field
+    let idx=0
+    while ( idx < len(s:headingpos) ) && ( pos > s:headingpos[idx] )
+        let idx = idx + 1
     endwhile
 
-    if pos <= fstfield && linenum != 1 && col('.') <= fstfield
+    " Move to previous field (and previous line if necessary)
+    let idx = idx - 1
+    if idx < 0
         let linenum = linenum - 1
-        let pos = lastpos
     endif
 
-    call cursor(linenum,pos)
+    " Move the cursor
+    if linenum >= 1
+        call cursor(linenum,s:headingpos[idx]+1)
+    endif
 endfunc
-
 
 " Function: NextField
 " Args: curmode
@@ -185,34 +203,39 @@ endfunc
 " or replace mode
 
 func! NextField(curmode)
-    let l:pos = Max(col('.') - 2,0)
-    let l:startnext = NextFieldPos(s:heading,s:fieldsep,pos)
+    " pos=0 means 1st char (Note that we are in virtual edit mode)
+    let l:pos = col('.') - 1
+    let l:posnext = NextFieldPos(pos)
     let l:linenum = line('.')
 
     "If no nextfield on line goto next line
     "append an empty line if in insert/replace mode
-    if startnext == 0
-        if a:curmode 
+    if posnext == -1
+        if a:curmode
             call append(linenum,'')
         endif
+        let pos = 0
         let linenum = linenum+1
-        let startnext = LenWS(s:heading,0) + 1
+        let posnext = NextFieldPos(-1)
     endif
 
     let l:linetext = ExpandTabs(getline(linenum))
-    let l:linelen = strlen(linetext)
-
-    "If padding required
-    if linelen < startnext
-        let linetext = linetext . Replicate(' ',startnext-linelen+1)
-        call setline(linenum,linetext)
+    if a:curmode
+        " Insert blanks
+        call setline(linenum,InsertWS(linetext,pos,posnext-pos))
+    else
+        " Pad if new cursor position is beyond end-of-line
+        if strlen(linetext) <= posnext
+            let linetext = linetext . repeat(' ',posnext-strlen(linetext) + 1)
+            call setline(linenum,linetext)
+        endif
     endif
 
     if linenum > line('$')
         let linenum = line('$')
-        let startnext = col('.')
+        let posnext = col('.') - 1
     endif
-    call cursor(linenum,startnext)
+    call cursor(linenum,posnext + 1)
 endfunc
 
 
@@ -220,24 +243,42 @@ endfunc
 " Args: string,pattern,startposition
 "
 " returns the position of the end of field in which pos
-" is contained
+" is contained (pos is 0-indexed)
 
-func! NextFieldPos(str,pat,pos)
-    return matchend(a:str,a:pat,a:pos) + 1
+func! NextFieldPos(pos)
+    let l:idx = 0
+    while idx < len(s:headingpos)
+        let l:fieldpos = s:headingpos[idx]
+        if fieldpos > a:pos
+            return fieldpos
+        endif
+        let idx = idx + 1
+    endwhile
+    return -1
 endfunc
 
 
-" Function: Gettext
-" Args: str, pos 
-" Description: Extract the text contents of a field from the 
-" string str, starting at position pos
+" Function: Getfield
+" Args: str, pos
+" Description: Extract the text contents of a field from the
+" string str, starting at position pos (pos 0-indexed)
 
-func! Gettext(str,pos)
+func! Getfield(str,pos)
     let endpos = match(a:str,s:fieldsep,a:pos)
     if endpos == -1
-        let endpos = strlen(a:str) - 1
+        return strpart(a:str,a:pos)
+    else
+        return strpart(a:str,a:pos,endpos - a:pos)
     endif
-    return strpart(a:str,a:pos,endpos - a:pos + 1)
+endfunc
+
+
+" Function: InsertWS
+" Args: str,pos,count
+" Description: Insert count WS at pos in str (pos 0-indexed)
+
+func! InsertWS(str,pos,count)
+    return strpart(a:str,0,a:pos) . repeat(' ',a:count) . strpart(a:str,a:pos)
 endfunc
 
 
@@ -246,12 +287,7 @@ endfunc
 " Description: Trim any WS at the end of the string str
 
 func! TrimWS(str)
-    let len = match(a:str,' \{1,}$',0)
-    if len == -1 
-        return a:str 
-    else
-        return strpart(a:str,0,len)
-    endif
+    return strpart(a:str,0,match(a:str,' *$'))
 endfunc
 
 
@@ -261,64 +297,21 @@ endfunc
 " position startpos in string str
 
 func! LenWS(str,startpos)
-    let i = 0
-    while a:str[a:startpos+i] == ' '
-        let i = i + 1
-    endwhile
-    return i
-endfunc
-
-
-" Function: Replicate
-" Args: str,cnt
-"
-" Repeat the given string cnt number of times
-
-func! Replicate(str,cnt)
-    let l:temp = ""
-
-    let l:i = 0
-    while i < a:cnt
-        let temp = temp . a:str
-        let i = i + 1
-    endwhile
-
-    return temp
+    return matchend(a:str,' *',a:startpos) - a:startpos
 endfunc
 
 
 " Function: ExpandTabs
 " Args: str
-" Return value: string 
+" Return value: string
 "
-" Expand all tabs in the string to spaces 
+" Expand all tabs in the string to spaces
 " according to tabstop value
+" TODO: FLAWED. Number of spaces to insert must depend
+" on the actual position of the tab character. Moreover
+" it should adapt to actual user preferences regarding
+" tab stops
 
 func! ExpandTabs(str)
-    let l:str = a:str
-    let l:temp = ""
-
-    let l:i = 0
-    while i < strlen(str)
-        if str[i] == "\t"
-            let temp = temp . Replicate(' ',&tabstop)
-        else
-            let temp = temp . str[i]
-        endif
-        let i = i + 1
-    endwhile
-
-    return temp
-endfunc
-
-" Function: Max
-" Args: x,y
-" Description: return the max of x and y
-
-func! Max(x,y)
-    if a:x >= a:y 
-        return a:x
-    else 
-        return a:y
-    endif
+    return substitute(a:str,"\t",repeat(' ',&tabstop),"")
 endfunc
